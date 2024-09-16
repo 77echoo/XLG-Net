@@ -26,9 +26,9 @@ word_embeddings_dim = 300
 word_vector_map = {}
 
 # shulffing
-doc_name_list = []  # 所有名字及标签
-doc_train_list = []  # 训练集的名字及标签
-doc_test_list = []  # 验证集的名字及标签
+doc_name_list = []
+doc_train_list = []
+doc_test_list = []
 
 f = open('data/' + dataset + '.txt', 'r')
 lines = f.readlines()
@@ -44,7 +44,7 @@ f.close()
 # print(doc_test_list)
 
 
-doc_content_list = []  # 数据集内容
+doc_content_list = []
 f = open('data/corpus/' + dataset + '.clean.txt', 'r')
 lines = f.readlines()
 for line in lines:
@@ -52,7 +52,7 @@ for line in lines:
 f.close()
 # print(doc_content_list)
 
-train_ids = []  # 训练集的索引
+train_ids = []
 for train_name in doc_train_list:
     train_id = doc_name_list.index(train_name)
     train_ids.append(train_id)
@@ -62,7 +62,7 @@ random.shuffle(train_ids)
 # partial labeled data
 # train_ids = train_ids[:int(0.2 * len(train_ids))]
 
-# 存储打乱后的索引
+
 train_ids_str = '\n'.join(str(index) for index in train_ids)
 f = open('data/' + dataset + '.train.index', 'w')
 f.write(train_ids_str)
@@ -80,12 +80,12 @@ f = open('data/' + dataset + '.test.index', 'w')
 f.write(test_ids_str)
 f.close()
 
-# 打乱后的训练集和测试集索引
+
 ids = train_ids + test_ids
 print(ids)
 print(len(ids))
 
-# 打乱后的名字及索引 + 内容
+
 shuffle_doc_name_list = []
 shuffle_doc_words_list = []
 for id in ids:
@@ -103,8 +103,8 @@ f.write(shuffle_doc_words_str)
 f.close()
 
 # build vocab
-word_freq = {}  # word频率
-word_set = set()  # word集合
+word_freq = {}
+word_set = set()
 for doc_words in shuffle_doc_words_list:
     words = doc_words.split()
     for word in words:
@@ -114,26 +114,26 @@ for doc_words in shuffle_doc_words_list:
         else:
             word_freq[word] = 1
 
-vocab = list(word_set)  # 词汇表
+vocab = list(word_set)
 vocab_size = len(vocab)
 
-word_doc_list = {}  # 每个词出现在哪些句子中
+word_doc_list = {}
 for i in range(len(shuffle_doc_words_list)):
     doc_words = shuffle_doc_words_list[i]
     words = doc_words.split()
     appeared = set()
     for word in words:
-        if word in appeared:  # 在本句中首次出现 -> 继续，否则下一轮循环。
+        if word in appeared:
             continue
-        if word in word_doc_list:  # 在本句首次出现，但以前(在前面的句子中)出现过，在记录中加上此句子的索引。
+        if word in word_doc_list:
             doc_list = word_doc_list[word]
             doc_list.append(i)
             word_doc_list[word] = doc_list
         else:
-            word_doc_list[word] = [i]  # 以前从未出现
+            word_doc_list[word] = [i]
         appeared.add(word)
 
-word_doc_freq = {}  # 词出现的频率(词出现在多少个句子中)
+word_doc_freq = {}
 for word, doc_list in word_doc_list.items():
     word_doc_freq[word] = len(doc_list)
 
@@ -156,30 +156,30 @@ definitions = []
 
 for word in vocab:
     word = word.strip()
-    synsets = wn.synsets(clean_str(word))   # 同义词
+    synsets = wn.synsets(clean_str(word))   
     word_defs = []
     for synset in synsets:
         syn_def = synset.definition()
-        word_defs.append(syn_def)   # 记录当前词的所有同义词的定义
+        word_defs.append(syn_def)   
     word_des = ' '.join(word_defs)
     if word_des == '':
         word_des = '<PAD>'
     definitions.append(word_des)
 
-# 词汇表中所有词及其同义词的定义
+
 string = '\n'.join(definitions)
 
 f = open('data/corpus/' + dataset + '_vocab_def.txt', 'w')
 f.write(string)
 f.close()
 
-# 把词汇定义的每一行转化为特征值
+
 tfidf_vec = TfidfVectorizer(max_features=1000)
 tfidf_matrix = tfidf_vec.fit_transform(definitions)
 tfidf_matrix_array = tfidf_matrix.toarray()
 print(tfidf_matrix_array[0], len(tfidf_matrix_array[0]))
 
-# 词汇及特征
+
 word_vectors = []
 
 for i in range(len(vocab)):
@@ -198,7 +198,7 @@ f = open('data/corpus/' + dataset + '_word_vectors.txt', 'w')
 f.write(string)
 f.close()
 
-# loadWord2Vec()返回值为 vocab, embedding, vocab2embedding字典
+
 word_vector_file = 'data/corpus/' + dataset + '_word_vectors.txt'
 _, embd, word_vector_map = loadWord2Vec(word_vector_file)
 word_embeddings_dim = len(embd[0])
@@ -247,7 +247,6 @@ for i in range(real_train_size):
             word_vector = word_vector_map[word]
             # print(doc_vec)
             # print(np.array(word_vector))
-            # doc_vec存储的是这句话的embedding的和
             doc_vec = doc_vec + np.array(word_vector)
 
     for j in range(word_embeddings_dim):
@@ -257,11 +256,9 @@ for i in range(real_train_size):
         data_x.append(doc_vec[j] / doc_len)  # doc_vec[j]/ doc_len
 
 # x = sp.csr_matrix((real_train_size, word_embeddings_dim), dtype=np.float32)
-# x是个稀疏矩阵，每一行是训练集每个句子中所有词的embedding相加再平均
 x = sp.csr_matrix((data_x, (row_x, col_x)), shape=(
     real_train_size, word_embeddings_dim))
 
-# y存储的是训练集每个样本的标签的独热编码
 y = []
 for i in range(real_train_size):
     doc_meta = shuffle_doc_name_list[i]
@@ -296,12 +293,10 @@ for i in range(test_size):
         # np.random.uniform(-0.25, 0.25)
         data_tx.append(doc_vec[j] / doc_len)  # doc_vec[j] / doc_len
 
-# 测试集的稀疏矩阵
 # tx = sp.csr_matrix((test_size, word_embeddings_dim), dtype=np.float32)
 tx = sp.csr_matrix((data_tx, (row_tx, col_tx)),
                    shape=(test_size, word_embeddings_dim))
 
-# 测试集的标签的独热编码
 ty = []
 for i in range(test_size):
     doc_meta = shuffle_doc_name_list[i + train_size]
@@ -318,7 +313,6 @@ print(ty)
 # (a superset of x)
 # unlabeled training instances -> words
 
-# 生成一个随机的稀疏矩阵，shape为vocab_size * embedding，数值大小为-0.01到0.01
 word_vectors = np.random.uniform(-0.01, 0.01,
                                  (vocab_size, word_embeddings_dim))
 
@@ -358,11 +352,9 @@ row_allx = np.array(row_allx)
 col_allx = np.array(col_allx)
 data_allx = np.array(data_allx)
 
-# allx存储的是训练集+验证集+词汇表中的单词的embedding(均值)
 allx = sp.csr_matrix(
     (data_allx, (row_allx, col_allx)), shape=(train_size + vocab_size, word_embeddings_dim))
 
-# ally存储的是训练集+验证集标签的独热编码+遍历词汇表中的每个单词，对每个单词都创建一个与标签数量相同长度的零向量独热编码(无标签)
 ally = []
 for i in range(train_size):
     doc_meta = shuffle_doc_name_list[i]
@@ -395,19 +387,17 @@ for doc_words in shuffle_doc_words_list:
     if length <= window_size:
         windows.append(words)
     else:
-        # 句子大于窗口的长度，窗口移动存储
         # print(length, length - window_size + 1)
         for j in range(length - window_size + 1):
             window = words[j: j + window_size]
             windows.append(window)
             # print(window)
 
-# 记录每个词出现在了几个窗口中
 word_window_freq = {}
 for window in windows:
     appeared = set()
     for i in range(len(window)):
-        if window[i] in appeared:  # 在本窗口中首次出现
+        if window[i] in appeared:
             continue
         if window[i] in word_window_freq:
             word_window_freq[window[i]] += 1
@@ -415,7 +405,6 @@ for window in windows:
             word_window_freq[window[i]] = 1
         appeared.add(window[i])
 
-# 计算单词对出现频率(包括重复)
 word_pair_count = {}
 for window in windows:
     for i in range(1, len(window)):
@@ -424,17 +413,14 @@ for window in windows:
             word_i_id = word_id_map[word_i]
             word_j = window[j]
             word_j_id = word_id_map[word_j]
-            # 相等则跳过
             if word_i_id == word_j_id:
                 continue
-            # 单词对
             word_pair_str = str(word_i_id) + ',' + str(word_j_id)
             if word_pair_str in word_pair_count:
                 word_pair_count[word_pair_str] += 1
             else:
                 word_pair_count[word_pair_str] = 1
             # two orders
-            # 反过来的顺序
             word_pair_str = str(word_j_id) + ',' + str(word_i_id)
             if word_pair_str in word_pair_count:
                 word_pair_count[word_pair_str] += 1
@@ -446,7 +432,6 @@ col = []
 weight = []
 
 # pmi as weights
-# pmi是词与词之间的权重
 
 num_window = len(windows)
 
@@ -461,7 +446,6 @@ for key in word_pair_count:
               (1.0 * word_freq_i * word_freq_j / (num_window * num_window)))
     if pmi <= 0:
         continue
-    # 两个词的相关性
     row.append(train_size + i)
     col.append(train_size + j)
     weight.append(pmi)
@@ -482,7 +466,6 @@ for i in range(vocab_size):
                 weight.append(similarity)
 '''
 # doc word frequency
-# 每个句子中每个词出现的次数
 doc_word_freq = {}
 
 for doc_id in range(len(shuffle_doc_words_list)):
@@ -490,14 +473,12 @@ for doc_id in range(len(shuffle_doc_words_list)):
     words = doc_words.split()
     for word in words:
         word_id = word_id_map[word]
-        # 句子的id + vocab中的word的id
         doc_word_str = str(doc_id) + ',' + str(word_id)
         if doc_word_str in doc_word_freq:
             doc_word_freq[doc_word_str] += 1
         else:
             doc_word_freq[doc_word_str] = 1
 
-# idf, 计算document和word之间的权重，故col只有vocab
 for i in range(len(shuffle_doc_words_list)):
     doc_words = shuffle_doc_words_list[i]
     words = doc_words.split()
@@ -514,9 +495,7 @@ for i in range(len(shuffle_doc_words_list)):
             row.append(i)
         # 如果是测试数据
         else:
-            # 如果i大于train_size，说明此时是test，需要加一个vocab_size，因为顺序是 train、vocab、test
             row.append(i + vocab_size)
-        # 因为是词汇表的词所以要加train_size
         col.append(train_size + j)
         idf = log(1.0 * len(shuffle_doc_words_list) /
                   word_doc_freq[vocab[j]])
@@ -524,12 +503,11 @@ for i in range(len(shuffle_doc_words_list)):
         doc_word_set.add(word)
 
 node_size = train_size + vocab_size + test_size
-# adj是记录词与词、document与词之间权重的矩阵
 adj = sp.csr_matrix(
     (weight, (row, col)), shape=(node_size, node_size))
 
 # dump objects
-# 导出
+# export
 f = open("data/ind.{}.x".format(dataset), 'wb')
 pkl.dump(x, f)
 f.close()

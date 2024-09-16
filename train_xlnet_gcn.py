@@ -118,7 +118,6 @@ def encode_input(text, tokenizer):
 
 
 input_ids, attention_mask = encode_input(text, model.tokenizer)
-# train + valid + vocab(零张量) + test
 input_ids = th.cat([input_ids[:-nb_test], th.zeros((nb_word, max_length), dtype=th.long), input_ids[-nb_test:]])
 attention_mask = th.cat(
     [attention_mask[:-nb_test], th.zeros((nb_word, max_length), dtype=th.long), attention_mask[-nb_test:]])
@@ -146,21 +145,18 @@ attention_mask2 = th.cat(
 # transform one-hot label to class ID for pytorch computation
 y = y_train + y_test + y_val
 y_train = y_train.argmax(axis=1)
-# y存储的就是标签id
 y = y.argmax(axis=1)
 
 # document mask used for update feature
 doc_mask = train_mask + val_mask + test_mask
 
 # build DGL Graph
-# 图归一化, sp.eye(adj.shape[0]) 创建了一个单位矩阵，然后将它与原始邻接矩阵相加，以确保每个节点都有一个自连接。
 adj_norm = normalize_adj(adj + sp.eye(adj.shape[0]))
 g = dgl.from_scipy(adj_norm.astype('float32'), eweight_name='edge_weight')
 # 将稀疏矩阵转为tensor
 adj = sys_normalized_adjacency(adj)
 adj = sparse_mx_to_torch_sparse_tensor(adj)
 adj = adj.to(gpu)
-# 将编码后的数据存储在图节点中
 g.ndata['input_ids'], g.ndata['attention_mask'] = input_ids, attention_mask
 g.ndata['input_ids1'], g.ndata['attention_mask1'] = input_ids1, attention_mask1
 g.ndata['input_ids2'], g.ndata['attention_mask2'] = input_ids2, attention_mask2
@@ -187,7 +183,6 @@ idx_loader = Data.DataLoader(doc_idx, batch_size=batch_size, shuffle=True)
 # Training
 def update_feature():
     global model, g, doc_mask
-    # mask掉vocab
     dataloader = Data.DataLoader(
         Data.TensorDataset(g.ndata['input_ids'][doc_mask], g.ndata['attention_mask'][doc_mask]),
         batch_size=1024
@@ -202,7 +197,6 @@ def update_feature():
             cls_list.append(output.cpu())
         cls_feat = th.cat(cls_list, axis=0)
     g = g.to(cpu)
-    # 更新图，不包含vocab
     g.ndata['cls_feats'][doc_mask] = cls_feat
     return g
 
@@ -223,17 +217,13 @@ optimizer = th.optim.Adam([
 scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[30], gamma=0.15)
 
 set_seed(args)
-# mix_layer_set这个列表中随机选择一个混合层进行数据混合，减去1，因为通常混合层的索引是从0开始的。
 mix_layer = np.random.choice(args.mix_layer_set, 1)[0] - 1
-# 确定lam的值，lam为混合时原始数据的混合权值。
-# 从Beta分布中随机抽样的一个值
 if args.beta == -1:
     lam = np.random.beta(args.alpha, args.alpha)
 else:
     lam = np.random.beta(args.alpha, args.beta)
-# 确保混合后的数据更接近原始数据，lam要更大
 lam = max(lam, 1 - lam)
-# dirichlet分布，获取混合增强数据时各个增强数据的隐藏层的权重
+# dirichlet
 ws = np.random.dirichlet([args.tau] * args.n_sample)
 
 
@@ -244,10 +234,7 @@ def train_step(engine, batch):
     g = g.to(gpu)
     optimizer.zero_grad()
     (idx,) = [x.to(gpu) for x in batch]
-    # 将0/1转化为bool型
     train_mask = g.ndata['train'][idx].type(th.BoolTensor)
-    # bertgcn的预测矩阵 batch * n_class
-    # 混合预测结果
     mix_outputs = model(g, adj, idx, lam, ws, mix_layer, 1)[train_mask]
     y_true = g.ndata['label_train'][idx][train_mask]
     loss = F.nll_loss(mix_outputs, y_true)
