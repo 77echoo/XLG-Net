@@ -80,11 +80,9 @@ f = open('data/' + dataset + '.test.index', 'w')
 f.write(test_ids_str)
 f.close()
 
-
 ids = train_ids + test_ids
 print(ids)
 print(len(ids))
-
 
 shuffle_doc_name_list = []
 shuffle_doc_words_list = []
@@ -309,9 +307,7 @@ for i in range(test_size):
 ty = np.array(ty)
 print(ty)
 
-# allx: the the feature vectors of both labeled and unlabeled training instances
-# (a superset of x)
-# unlabeled training instances -> words
+
 
 word_vectors = np.random.uniform(-0.01, 0.01,
                                  (vocab_size, word_embeddings_dim))
@@ -401,7 +397,7 @@ for window in windows:
             continue
         if window[i] in word_window_freq:
             word_window_freq[window[i]] += 1
-        else:  # 在所有窗口中首次出现
+        else:
             word_window_freq[window[i]] = 1
         appeared.add(window[i])
 
@@ -487,13 +483,10 @@ for i in range(len(shuffle_doc_words_list)):
         if word in doc_word_set:
             continue
         j = word_id_map[word]
-        # 句子id + 词汇表id
         key = str(i) + ',' + str(j)
         freq = doc_word_freq[key]
-        # 如果是训练数据
         if i < train_size:
             row.append(i)
-        # 如果是测试数据
         else:
             row.append(i + vocab_size)
         col.append(train_size + j)

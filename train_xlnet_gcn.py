@@ -153,7 +153,6 @@ doc_mask = train_mask + val_mask + test_mask
 # build DGL Graph
 adj_norm = normalize_adj(adj + sp.eye(adj.shape[0]))
 g = dgl.from_scipy(adj_norm.astype('float32'), eweight_name='edge_weight')
-# 将稀疏矩阵转为tensor
 adj = sys_normalized_adjacency(adj)
 adj = sparse_mx_to_torch_sparse_tensor(adj)
 adj = adj.to(gpu)
