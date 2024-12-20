@@ -3,9 +3,7 @@ import torch.nn.functional as F
 from utils import *
 import dgl
 import torch.utils.data as Data
-from ignite.engine import Events, Engine
-from ignite.metrics import Accuracy, Loss
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 import numpy as np
 import os
 import shutil
@@ -16,6 +14,7 @@ from torch.optim import lr_scheduler
 from model import XLG_Net
 import pickle
 import random
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--max_length', type=int, default=128, help='the input length for xlnet')
@@ -24,24 +23,25 @@ parser.add_argument('--nb_epochs', type=int, default=50)
 parser.add_argument('--model_init', type=str, default='xlnet_base_cased')
 parser.add_argument('--pretrained_bert_ckpt', default=None)
 parser.add_argument('--checkpoint_dir', default=None,
-                    help='checkpoint directory, XLGNet_[dataset] if not specified')
-parser.add_argument('--n_hidden', type=int, default=200,
-                    help='the dimension of gcnii hidden layer')
+                    help='checkpoint directory, [model_init]_[gcn_model]_[dataset] if not specified')
+parser.add_argument('--gcn_model', type=str, default='gcnii')
+parser.add_argument('--n_hidden', type=int, default=200, help='the dimension of GCNII hidden layer')
 
 parser.add_argument('-m', '--m', type=float, default=0.6, help='the factor balancing XLNetMix and GCNII prediction')
-parser.add_argument('--dataset', default='mr', choices=['R52', 'ohsumed', 'mr'])
+parser.add_argument('--dataset', default='mr', choices=['20ng', 'R8', 'R52', 'ohsumed', 'mr'])
 parser.add_argument('--dropout', type=float, default=0.5)
-parser.add_argument('--bert_lr', type=float, default=1e-6)
-parser.add_argument('--gcn_lr', type=float, default=2e-3)
+parser.add_argument('--bert_lr', type=float, default=7e-7)
+parser.add_argument('--gcn_lr', type=float, default=1e-3)
 parser.add_argument('--mix_layer_set', nargs='+', default=[9, 10, 12], type=int, help='define a set of mix layers')
 parser.add_argument('--gcn_layers', type=int, default=8)
 
+parser.add_argument('--k_fold', default=0, type=int, help='whether k-fold cross-validation is employed ')
 parser.add_argument('--alpha', default=0.75, type=float, help='alpha for beta distribution')
 parser.add_argument('--beta', default=-1, type=float, help='another param for beta distribution')
 parser.add_argument('--tau', default=1, type=float, help='tau for dirichlet distribution')
 parser.add_argument('--seed', type=int, default=77, help="random seed for initialization")
 parser.add_argument('--n_sample', type=int, default=2, help='num of aug samples')
-parser.add_argument('--gcnii_alpha', type=float, default=0.1, help='gcnii alpha')
+parser.add_argument('--gcnii_alpha', type=float, default=0.1, help='GCNII alpha')
 parser.add_argument('--wd1', type=float, default=0.01, help='weight decay (L2 loss on parameters).')
 parser.add_argument('--wd2', type=float, default=5e-4, help='weight decay (L2 loss on parameters).')
 
@@ -54,15 +54,17 @@ model_init = args.model_init
 pretrained_bert_ckpt = args.pretrained_bert_ckpt
 dataset = args.dataset
 checkpoint_dir = args.checkpoint_dir
+gcn_model = args.gcn_model
 gcn_layers = args.gcn_layers
 n_hidden = args.n_hidden
 dropout = args.dropout
 gcn_lr = args.gcn_lr
 bert_lr = args.bert_lr
 gcnii_alpha = args.gcnii_alpha
+k_fold = args.k_fold
 
 if checkpoint_dir is None:
-    ckpt_dir = './checkpoint/XLGNet_{}'.format(dataset)
+    ckpt_dir = './checkpoint/{}_{}_{}'.format(model_init, gcn_model, dataset)
 else:
     ckpt_dir = checkpoint_dir
 os.makedirs(ckpt_dir, exist_ok=True)
@@ -196,6 +198,7 @@ def update_feature():
             cls_list.append(output.cpu())
         cls_feat = th.cat(cls_list, axis=0)
     g = g.to(cpu)
+    # update
     g.ndata['cls_feats'][doc_mask] = cls_feat
     return g
 
@@ -213,7 +216,7 @@ optimizer = th.optim.Adam([
     {'params': model.gcnii.params2, 'weight_decay': args.wd2, 'lr': bert_lr},
 ], lr=1e-3
 )
-scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[30], gamma=0.15)
+scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[30], gamma=0.1)
 
 set_seed(args)
 mix_layer = np.random.choice(args.mix_layer_set, 1)[0] - 1
@@ -222,12 +225,10 @@ if args.beta == -1:
 else:
     lam = np.random.beta(args.alpha, args.beta)
 lam = max(lam, 1 - lam)
-# dirichlet
 ws = np.random.dirichlet([args.tau] * args.n_sample)
 
 
-def train_step(engine, batch):
-    global model, g, optimizer
+def train_step(model, g, optimizer, batch):
     model.train()
     model = model.to(gpu)
     g = g.to(gpu)
@@ -244,76 +245,156 @@ def train_step(engine, batch):
     with th.no_grad():
         if train_mask.sum() > 0:
             y_true = y_true.detach().cpu()
-            y_pred = mix_outputs.argmax(axis=1).detach().cpu()
+            y_pred = mix_outputs.argmax(dim=1).detach().cpu()
             train_acc = accuracy_score(y_true, y_pred)
         else:
             train_acc = 1
     return train_loss, train_acc
 
 
-trainer = Engine(train_step)
-
-
-@trainer.on(Events.EPOCH_COMPLETED)
-def reset_graph(trainer):
-    scheduler.step()
-    update_feature()
-    th.cuda.empty_cache()
-
-
-def test_step(engine, batch):
-    global model, g
+def test_step(model, g, batch):
+    model.eval()
+    model = model.to(gpu)
+    g = g.to(gpu)
     with th.no_grad():
-        model.eval()
-        model = model.to(gpu)
-        g = g.to(gpu)
         (idx,) = [x.to(gpu) for x in batch]
         y_pred = model(g, adj, idx)
         y_true = g.ndata['label'][idx]
         return y_pred, y_true
 
 
-evaluator = Engine(test_step)
-metrics = {
-    'acc': Accuracy(),
-    'nll': Loss(th.nn.NLLLoss())
-}
-for n, f in metrics.items():
-    f.attach(evaluator, n)
+def evaluator(data_loader):
+    for batch in data_loader:
+        total_loss = 0
+        y_pred, y_true = test_step(model, g, batch)
+        # loss
+        loss = F.nll_loss(y_pred, y_true)
+        total_loss += loss.detach().item()
+        loss = total_loss / len(data_loader)
+        # acc
+        y_true = y_true.detach().cpu()
+        y_pred = y_pred.argmax(dim=1).detach().cpu()
+        acc = accuracy_score(y_true, y_pred)
+        # macro_f1
+        macro_f1 = f1_score(y_true, y_pred, average='macro')
+
+        return acc, macro_f1, loss
 
 
-@trainer.on(Events.EPOCH_COMPLETED)
-def log_training_results(trainer):
-    evaluator.run(idx_loader_train)
-    metrics = evaluator.state.metrics
-    train_acc, train_nll = metrics["acc"], metrics["nll"]
-    evaluator.run(idx_loader_val)
-    metrics = evaluator.state.metrics
-    val_acc, val_nll = metrics["acc"], metrics["nll"]
-    evaluator.run(idx_loader_test)
-    metrics = evaluator.state.metrics
-    test_acc, test_nll = metrics["acc"], metrics["nll"]
-    logger.info(
-        "Epoch: {}  Train acc: {:.4f} loss: {:.4f}  Val acc: {:.4f} loss: {:.4f}  Test acc: {:.4f} loss: {:.4f}"
-        .format(trainer.state.epoch, train_acc, train_nll, val_acc, val_nll, test_acc, test_nll)
-    )
-    if val_acc > log_training_results.best_val_acc:
-        logger.info("New checkpoint")
-        th.save(
-            {
-                'xlnet_model': model.xlnet_model.state_dict(),
-                'classifier': model.classifier.state_dict(),
-                'gcnii': model.gcnii.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': trainer.state.epoch,
-            },
-            os.path.join(
-                ckpt_dir, 'checkpoint.pth'
+def k_fold_cross_validation(model, g, nb_train, epochs, scheduler, k=5):
+    total_val_acc = 0
+
+    idx_arr = th.arange(0, nb_train, dtype=th.long)
+    th.manual_seed(42)
+    shuffled_arr = idx_arr[th.randperm(idx_arr.nelement())]
+    chunks = list(shuffled_arr.chunk(k))
+
+    new_idx_val = th.arange(nb_train, nb_train + nb_val, dtype=th.long)
+    sample_size1 = len(new_idx_val) // k
+    random_indices1 = th.randperm(len(new_idx_val))[:sample_size1]
+    new_idx_val = new_idx_val[random_indices1]
+
+    new_idx_test = th.arange(nb_node - nb_test, nb_node, dtype=th.long)
+    sample_size2 = len(new_idx_test) // k
+    random_indices2 = th.randperm(len(new_idx_test))[:sample_size2]
+    new_idx_test = new_idx_test[random_indices2]
+
+    val_subset = Data.TensorDataset(new_idx_val)
+    val_loader = Data.DataLoader(val_subset, batch_size=32, shuffle=True)
+    test_subset = Data.TensorDataset(new_idx_test)
+    test_loader = Data.DataLoader(test_subset, batch_size=32, shuffle=True)
+
+    for fold, chunk in enumerate(chunks):
+        print(f'Fold {fold + 1}/{k}')
+
+        train_subset = Data.TensorDataset(chunk)
+        train_loader = Data.DataLoader(train_subset, batch_size=32, shuffle=True)
+
+        best_val_acc = 0
+        for epoch in range(epochs):
+            training_loss = 0
+            training_acc = 0
+            with tqdm(total=len(train_loader), desc=f'Epoch {epoch + 1}/{epochs}', unit='batch') as pbar:
+                for batch in train_loader:
+                    loss, acc = train_step(model, g, optimizer, batch)
+                    training_loss += loss
+                    training_acc += acc
+                    pbar.update(1)
+                    pbar.set_postfix(loss=f'{training_loss / (pbar.n + 1):.4f}',
+                                     accuracy=f'{training_acc / (pbar.n + 1):.4f}')
+
+            scheduler.step()
+            th.cuda.empty_cache()
+            pbar.close()
+
+            # print
+            train_acc, train_f1, train_nll = evaluator(train_loader)
+            val_acc, val_f1, val_nll = evaluator(val_loader)
+            test_acc, test_f1, test_nll = evaluator(test_loader)
+
+            logger.info(
+                "Epoch: {}  Train acc: {:.4f} f1: {:.4f} loss: {:.4f}  Val acc: {:.4f} f1: {:.4f} loss: {:.4f}  Test acc: {:.4f} f1: {:.4f} loss: {:.4f}"
+                .format(epoch + 1, train_acc, train_f1, train_nll, val_acc, val_f1, val_nll, test_acc, test_f1,
+                        test_nll)
             )
+
+            if val_acc > best_val_acc:
+                logger.info("New checkpoint")
+                best_val_acc = val_acc
+        total_val_acc += best_val_acc
+    logger.info(
+        "The average accuracy rate of k-fold cross-validation is: {:.4f}"
+        .format(total_val_acc / k)
+    )
+
+
+def train(model, g, optimizer, data_loader, epochs, scheduler):
+    best_val_acc = 0
+    for epoch in range(epochs):
+        training_loss = 0
+        training_acc = 0
+        with tqdm(total=len(data_loader), desc=f'Epoch {epoch + 1}/{epochs}', unit='batch') as pbar:
+            for batch in data_loader:
+                loss, acc = train_step(model, g, optimizer, batch)
+                training_loss += loss
+                training_acc += acc
+                pbar.update(1)
+                pbar.set_postfix(loss=f'{training_loss / (pbar.n + 1):.4f}',
+                                 accuracy=f'{training_acc / (pbar.n + 1):.4f}')
+
+        scheduler.step()
+        update_feature()
+        th.cuda.empty_cache()
+        pbar.close()
+
+        # print
+        train_acc, train_f1, train_nll = evaluator(idx_loader_train)
+        val_acc, val_f1, val_nll = evaluator(idx_loader_val)
+        test_acc, test_f1, test_nll = evaluator(idx_loader_test)
+
+        logger.info(
+            "Epoch: {}  Train acc: {:.4f} f1: {:.4f} loss: {:.4f}  Val acc: {:.4f} f1: {:.4f} loss: {:.4f}  Test acc: {:.4f} f1: {:.4f} loss: {:.4f}"
+            .format(epoch + 1, train_acc, train_f1, train_nll, val_acc, val_f1, val_nll, test_acc, test_f1, test_nll)
         )
-        log_training_results.best_val_acc = val_acc
+        if val_acc > best_val_acc:
+            logger.info("New checkpoint")
+            th.save(
+                {
+                    'xlnet_model': model.xlnet_model.state_dict(),
+                    'classifier': model.classifier.state_dict(),
+                    'gcnii': model.gcnii.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch,
+                },
+                os.path.join(
+                    ckpt_dir, 'checkpoint.pth'
+                )
+            )
+            best_val_acc = val_acc
 
 
-log_training_results.best_val_acc = 0
 g = update_feature()
-trainer.run(idx_loader, max_epochs=nb_epochs)
+if k_fold > 0:
+    k_fold_cross_validation(model, g, nb_train, nb_epochs, scheduler, k_fold)
+else:
+    train(model, g, optimizer, idx_loader, nb_epochs, scheduler)
